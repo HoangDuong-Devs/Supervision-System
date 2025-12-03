@@ -11,63 +11,45 @@ from uniface import compute_similarity
 recognizer = ArcFace()
 
 # Dataset path
-dataset_path = r"F:\VScode_NHD\boxmot\vgg_face_dataset"
+dataset_path = r"F:\VScode_NHD\boxmot\faces_dataset"
 
 # Number of persons to sample
-num_persons = 50
+num_persons = 2
 
 # Load dataset for selected persons and extract embeddings
 def load_sampled_database(num_persons):
     files_path = os.path.join(dataset_path, 'files')
-    all_persons_files = [f for f in os.listdir(files_path) if f.endswith('.txt')]
-    print(f"Found {len(all_persons_files)} person files in {files_path}")
+    if os.path.isdir(files_path):
+        all_persons = [d for d in os.listdir(files_path) if os.path.isdir(os.path.join(files_path, d))]
+        dataset_path_actual = files_path
+    else:
+        all_persons = [d for d in os.listdir(dataset_path) if os.path.isdir(os.path.join(dataset_path, d))]
+        dataset_path_actual = dataset_path
     
-    if len(all_persons_files) < num_persons:
-        num_persons = len(all_persons_files)
-    sampled_files = random.sample(all_persons_files, num_persons)
-    print(f"Sampled {num_persons} persons: {[f[:-4] for f in sampled_files[:5]]}...")
+    print(f"Using dataset path: {dataset_path_actual}")
+    print(f"Found {len(all_persons)} folders in dataset: {all_persons[:10]}...")  # Debug
+    if len(all_persons) < num_persons:
+        num_persons = len(all_persons)
+    sampled_persons = random.sample(all_persons, num_persons)
+    print(f"Sampled {num_persons} persons: {sampled_persons[:5]}...")  # Debug
     
     database = {}
-    for person_file in sampled_files:
-        person_name = person_file[:-4]  # Remove .txt
-        file_path = os.path.join(files_path, person_file)
+    for person_name in sampled_persons:
+        person_path = os.path.join(dataset_path_actual, person_name)
         embeddings = []
+        image_files = [f for f in os.listdir(person_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        print(f"Person {person_name}: {len(image_files)} images")  # Debug
         
-        with open(file_path, 'r') as f:
-            lines = f.readlines()
-        
-        # Limit to 10 images per person
-        for line in lines[:10]:
-            parts = line.strip().split()
-            if len(parts) < 6:
-                continue
-            url = unquote(parts[1])  # Decode URL
-            left, top, right, bottom = map(int, map(float, parts[2:6]))  # Convert to int
-            
-            try:
-                response = requests.get(url, timeout=10)
-                if response.status_code != 200:
-                    continue
-                image_array = np.frombuffer(response.content, np.uint8)
-                image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-                if image is None:
-                    continue
-                
-                # Crop face
-                face = image[top:bottom, left:right]
-                if face.size == 0 or face.shape[0] == 0 or face.shape[1] == 0:
-                    continue
-                
-                # Assuming images need alignment, but for simplicity, use as is
-                embedding = recognizer.get_embedding(face)
+        for image_file in image_files[:10]:  # Limit to 10 images per person
+            image_path = os.path.join(person_path, image_file)
+            image = cv2.imread(image_path)
+            if image is not None:
+                # Assuming images are cropped/aligned
+                embedding = recognizer.get_embedding(image)
                 embeddings.append(embedding)
-            except Exception as e:
-                print(f"Error downloading {url}: {e}")
-                continue
         
         if embeddings:
             database[person_name] = np.array(embeddings)
-        print(f"Person {person_name}: {len(embeddings)} embeddings")
     
     return database
 
