@@ -64,4 +64,7 @@ boxmot/motion/cmc/*.jpg
 *.pt
 *.jpg
 
-test_video
+test_video/
+vgg_face_dataset/
+
+*data*
