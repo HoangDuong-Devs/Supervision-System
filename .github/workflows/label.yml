@@ -1,0 +1,73 @@
+name: Label issues
+
+on:
+  issues:
+    types:
+      - opened
+      - reopened
+
+jobs:
+  label_issues:
+    name: "Issue: add labels"
+    if: ${{ github.event.action == 'opened' || github.event.action == 'reopened' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Label new issues
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Combine title + body
+            const title = context.payload.issue.title  || ''
+            const body  = context.payload.issue.body   || ''
+            const content = `${title}\n${body}`
+
+            // Always start with triage
+            const labels = ['triage']
+
+            // Map each directory/tracker → regex
+            const mapping = {
+              'reid'           : /\b(?:appearance|re[- ]?id|re[- ]?identification)\b/i,
+              'kf'             : /\b(?:kf|kalman[- ]?filter)s?\b/i,
+              'postprocessing' : /\bpostprocessing\b/i,
+
+              // engine-related categories
+              'engine'         : /\b(engine|cli|detectors|track|val)\b/i,
+              'tuning'         : /\b(?:tuning|hyperparameter(?:s)?|evolution|evolve)\b/i,
+              'evaluation'     : /\b(?:evaluation|eval(?:uation)?|val(?:idation)?)\b/i,
+              'tracking'       : /\b(?:track(?:ing)?|track)\b/i,
+
+              // individual tracker labels
+              'boosttrack'     : /\bboosttrack\b/i,
+              'botsort'        : /\bbotsort\b/i,
+              'bytetrack'      : /\bbytetrack\b/i,
+              'deepocsort'     : /\bdeepocsort\b/i,
+              'hybridsort'     : /\bhybridsort\b/i,
+              'ocsort'         : /\bocsort\b/i,
+              'strongsort'     : /\bstrongsort\b/i,
+              'tracktrack'     : /\btracktrack\b/i,
+
+              // per-dataset labels
+              'datasets'       : /\dataset?\b/i,
+              'mot17'          : /\bMOT17\b/i,
+              'mot20'          : /\bMOT20\b/i,
+              'dancetrack'     : /\bDanceTrack\b/i,
+            }
+
+            // Add any matching labels
+            for (const [label, regex] of Object.entries(mapping)) {
+              if (regex.test(content)) {
+                labels.push(label)
+              }
+            }
+
+            // Apply them in one call
+            await github.rest.issues.addLabels({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+              labels
+            })
