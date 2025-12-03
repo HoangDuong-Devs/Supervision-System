@@ -1,10 +1,11 @@
 import cv2
 import os
 import time
-from uniface import RetinaFace
+from uniface import RetinaFace, AgeGender
 
-# Initialize detector
+# Initialize detector and age-gender model
 detector = RetinaFace()
+age_gender = AgeGender()
 
 # Folder containing test images
 test_folder = "test_face_detections"
@@ -39,12 +40,29 @@ for image_file in image_files:
         bbox = face['bbox']  # [x1, y1, x2, y2]
         confidence = face['confidence']
         landmarks = face['landmarks']  # 5-point landmarks
-        if confidence > 0.8:
+        if confidence > 0.85:
             x1, y1, x2, y2 = map(int, bbox)
             cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
             for point in landmarks:
                 x, y = point
                 cv2.circle(image, (int(x), int(y)), 2, (0, 0, 255), -1)
+            
+            # Predict age and gender (demo only, accuracy varies)
+            gender_id, age = age_gender.predict(image, bbox)
+            age_int = int(age)
+            gender = 'Female' if gender_id == 0 else 'Male'
+            
+            # Draw text with scaled font to fit bbox width
+            text = f"{gender}, {age_int}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            thickness = 2
+            text_size = cv2.getTextSize(text, font, 1, thickness)[0]
+            text_width = text_size[0]
+            bbox_width = x2 - x1
+            scale = bbox_width / text_width if text_width > 0 else 1
+            scale = max(scale, 0.5)  # Min scale to avoid too small
+            
+            cv2.putText(image, text, (x1, y1 - 10), font, scale, (255, 0, 0), thickness)
     
     # Measure inference time (only detection, not drawing)
     start_time = time.time()
