@@ -20,14 +20,14 @@ from yolov7.utils.general import non_max_suppression, scale_coords
 
 @dataclass
 class TrackingConfig:
-    source      : str   = r"test_video\aicity.mp4"
+    source      : str   = r"test_video\leloi1.mp4"
     weights     : str   = "best.pt"
     detect_class: int   = 2
-    tracker_type: str   = "botsort"
+    tracker_type: str   = "deepocsort"  # BotSort hoạt động tốt hơn khi tắt ReID
     device      : str   = "0"
     conf_thres  : float = 0.3
     iou_thres   : float = 0.65
-    output      : str   = "final_feat_1.avi"
+    output      : str   = "demo.avi"
     img_size    : int   = 416
     half        : bool  = False
     per_class   : bool  = False
@@ -58,15 +58,27 @@ def run_tracking(cfg: TrackingConfig) -> None:
     model.eval()
     print(f"[INFO] YOLOv7 model on: {next(model.parameters()).device}")
 
+    # Tắt ReID cho BotSort bằng cách set reid_weights=None
+    reid_weights = None if cfg.tracker_type == "botsort" else Path("osnet_x1_0_msmt17.pt")
+    
+    # List of trackers that support ReID toggle
+    trackers_with_reid = ["strongsort", "botsort", "deepocsort", "hybridsort", "boosttrack"]
+    
     tracker = create_tracker(
         tracker_type=cfg.tracker_type,
         tracker_config=TRACKER_CONFIGS / f"{cfg.tracker_type}.yaml",
         half=cfg.half,
         per_class=cfg.per_class,
-        reid_weights=Path("osnet_x1_0_msmt17.pt"),
-        device=selected_device
+        reid_weights=reid_weights,
+        device=selected_device,
+        with_reid=True if cfg.tracker_type in trackers_with_reid else None
     )
-    print(f"[INFO] Tracker and ReID model on: {selected_device}")
+    if cfg.tracker_type == "botsort":
+        print(f"[INFO] Tracker on: {selected_device} (ReID disabled for BotSort)")
+    elif cfg.tracker_type in trackers_with_reid:
+        print(f"[INFO] Tracker and ReID model on: {selected_device}")
+    else:
+        print(f"[INFO] Tracker on: {selected_device}")
     try:
         if hasattr(tracker, 'model') and tracker.model is not None and hasattr(tracker.model, 'parameters'):
             print(f"[INFO] ReID model device: {next(tracker.model.parameters()).device}")

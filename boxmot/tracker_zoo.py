@@ -17,6 +17,7 @@ def create_tracker(
     device=None,
     half=None,
     per_class=None,
+    with_reid=None,
     evolve_param_dict=None,
 ):
     """
@@ -29,6 +30,7 @@ def create_tracker(
     - device: Device to run the tracker on (e.g., 'cpu', 'cuda').
     - half: Boolean indicating whether to use half-precision.
     - per_class: Boolean for class-specific tracking (optional).
+    - with_reid: Boolean to enable/disable ReID for trackers that support it (optional).
     - evolve_param_dict: A dictionary of parameters for evolving the tracker.
 
     Returns:
@@ -56,6 +58,7 @@ def create_tracker(
         "reid_weights": reid_weights,
         "device": device,
         "half": half,
+        "with_reid": with_reid,
     }
 
     # Map tracker types to their corresponding classes
@@ -86,7 +89,9 @@ def create_tracker(
         "boosttrack",
     ]:
         tracker_args["per_class"] = per_class
-        tracker_args.update(reid_args)
+        # Only update with non-None ReID args
+        filtered_reid_args = {k: v for k, v in reid_args.items() if v is not None}
+        tracker_args.update(filtered_reid_args)
         if tracker_type in ["strongsort"]:
             tracker_args.pop("per_class")  # per class not supported by
     else:
@@ -94,6 +99,6 @@ def create_tracker(
 
     # Return the instantiated tracker class with arguments and warmed-up models
     tracker = tracker_class(**tracker_args)
-    if hasattr(tracker, "model"):
+    if hasattr(tracker, "model") and tracker.model is not None:
         tracker.model.warmup()
     return tracker
