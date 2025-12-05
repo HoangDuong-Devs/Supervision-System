@@ -1,99 +1,176 @@
+# =============================================================================
+# HybridSORT Configuration File
+# =============================================================================
+# HybridSORT là một thuật toán object tracking kết hợp nhiều kỹ thuật:
+# - BYTE-like association (sử dụng detections có confidence thấp)
+# - Kalman Filter tùy chỉnh
+# - ReID (Re-Identification) features dài hạn
+# - TCM (Tracklet Confidence Modeling)
+#
+# Mỗi tham số có các thuộc tính:
+#   - type: Kiểu dữ liệu/phân phối (uniform, randint, choice)
+#   - default: Giá trị mặc định được sử dụng
+#   - range/options: Phạm vi giá trị cho hyperparameter tuning
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DETECTION THRESHOLDS - Ngưỡng phát hiện đối tượng
+# -----------------------------------------------------------------------------
+
+# Ngưỡng confidence thấp cho BYTE association
+# Các detections có confidence từ low_thresh đến track_thresh được sử dụng
+# trong bước association thứ hai để recover các tracks bị mất
 low_thresh:
   type: uniform
-  default: 0.1
-  range: [0.05, 0.5]
+  default: 0.1          # Ngưỡng thấp = 0.1 (10% confidence)
+  range: [0.05, 0.5]    # Có thể tune từ 5% đến 50%
 
+# Ngưỡng confidence chính để xác định detections "high score"
+# Detections >= track_thresh được ưu tiên association trước
+track_thresh:
+  type: uniform
+  default: 0.5          # Ngưỡng cao = 0.5 (50% confidence)
+  range: [0.3, 0.7]     # Có thể tune từ 30% đến 70%
+
+# -----------------------------------------------------------------------------
+# KALMAN FILTER SETTINGS - Cài đặt bộ lọc Kalman
+# -----------------------------------------------------------------------------
+
+# Khoảng cách thời gian (số frames) được sử dụng cho motion prediction
+# Giá trị lớn hơn = dự đoán xa hơn trong tương lai
 delta_t:
   type: randint
-  default: 3
-  range: [1, 6]  # upper bound exclusive
+  default: 3            # Mặc định: 3 frames
+  range: [1, 6]         # Từ 1 đến 5 frames (upper bound exclusive)
 
+# Hệ số quán tính cho motion model
+# Giá trị cao = chuyển động mượt hơn nhưng phản ứng chậm hơn với thay đổi đột ngột
 inertia:
   type: uniform
-  default: 0.05
-  range: [0.01, 0.2]
+  default: 0.05         # Quán tính nhỏ = phản ứng nhanh với thay đổi
+  range: [0.01, 0.2]    # Từ 1% đến 20%
 
-use_byte:
-  type: choice
-  default: True
-  options: [True, False]
-
+# Sử dụng Kalman Filter tùy chỉnh (Custom KF)
+# True: Sử dụng KF được tối ưu hóa cho tracking
+# False: Sử dụng KF tiêu chuẩn
 use_custom_kf:
   type: choice
   default: True
   options: [True, False]
 
+# -----------------------------------------------------------------------------
+# BYTE ASSOCIATION - Kỹ thuật BYTE (sử dụng low-score detections)
+# -----------------------------------------------------------------------------
+
+# Bật/tắt BYTE association strategy
+# True: Sử dụng cả detections low-score để recover tracks
+# False: Chỉ sử dụng high-score detections
+use_byte:
+  type: choice
+  default: True
+  options: [True, False]
+
+# -----------------------------------------------------------------------------
+# REID (Re-IDentification) SETTINGS - Cài đặt nhận dạng lại đối tượng
+# -----------------------------------------------------------------------------
+
+# Độ dài ngân hàng lưu trữ ReID features dài hạn (số frames)
+# Features được lưu để so sánh khi track bị mất và xuất hiện lại
 longterm_bank_length:
   type: randint
-  default: 30
-  range: [10, 61, 10]  # step size 10
+  default: 30           # Lưu features trong 30 frames
+  range: [10, 61, 10]   # Từ 10 đến 60 frames, bước nhảy 10
 
+# Hệ số alpha cho Exponential Moving Average (EMA) của ReID features
+# alpha cao = ưu tiên features mới, alpha thấp = ưu tiên features cũ
 alpha:
   type: uniform
-  default: 0.9
-  range: [0.7, 0.99]
+  default: 0.9          # 90% weight cho feature mới
+  range: [0.7, 0.99]    # Từ 70% đến 99%
 
-adapfs:
-  type: choice
-  default: False
-  options: [True, False]
-
-track_thresh:
-  type: uniform
-  default: 0.5
-  range: [0.3, 0.7]
-
+# Trọng số ReID cho detections có confidence cao (Embedding Guidance)
+# Ảnh hưởng đến mức độ sử dụng appearance features trong matching
 EG_weight_high_score:
   type: uniform
-  default: 1.0  # Giảm từ 4.6 xuống 1.0 để giảm ảnh hưởng ReID
-  range: [0.5, 3.0]
+  default: 1.0          # Giảm từ 4.6 xuống 1.0 để giảm ảnh hưởng ReID
+  range: [0.5, 3.0]     # Từ 0.5 đến 3.0
 
+# Trọng số ReID cho detections có confidence thấp
 EG_weight_low_score:
   type: uniform
-  default: 0.5  # Giảm từ 1.3 xuống 0.5
-  range: [0.1, 1.0]
+  default: 0.5          # Giảm từ 1.3 xuống 0.5
+  range: [0.1, 1.0]     # Từ 0.1 đến 1.0
 
-TCM_first_step:
-  type: choice
-  default: True
-  options: [True, False]
-
-TCM_byte_step:
-  type: choice
-  default: True
-  options: [True, False]
-
-TCM_byte_step_weight:
-  type: uniform
-  default: 1.0
-  range: [0.5, 2.0]
-
-high_score_matching_thresh:
-  type: uniform
-  default: 0.7
-  range: [0.5, 0.9]
-
+# Bật/tắt ReID dài hạn
+# True: Sử dụng stored features để match objects xuất hiện lại
 with_longterm_reid:
   type: choice
   default: True
   options: [True, False]
 
+# Trọng số cho longterm ReID trong cost matrix
 longterm_reid_weight:
   type: uniform
-  default: 0.0
-  range: [0.0, 2.0]
+  default: 0.0          # 0.0 = không sử dụng (có thể bật lên nếu cần)
+  range: [0.0, 2.0]     # Từ 0 đến 2.0
 
+# Bật/tắt correction dựa trên longterm ReID
+# Dùng để sửa lỗi association khi có ID switch
 with_longterm_reid_correction:
   type: choice
   default: True
   options: [True, False]
 
+# Ngưỡng similarity cho longterm ReID correction 
+# Cần similarity >= ngưỡng này để trigger correction
 longterm_reid_correction_thresh:
   type: uniform
-  default: 0.4
-  range: [0.1, 0.7]
+  default: 0.4          # 40% similarity threshold
+  range: [0.1, 0.7]     # Từ 10% đến 70%
 
+# Ngưỡng thấp cho longterm ReID correction (cho trường hợp ít chắc chắn)
 longterm_reid_correction_thresh_low:
   type: uniform
-  default: 0.4
-  range: [0.1, 0.7]
+  default: 0.4          # 40% similarity threshold
+  range: [0.1, 0.7]     # Từ 10% đến 70%
+
+# -----------------------------------------------------------------------------
+# TCM (Tracklet Confidence Modeling) - Mô hình hóa độ tin cậy tracklet
+# -----------------------------------------------------------------------------
+
+# Bật/tắt TCM ở bước matching đầu tiên (high-score detections)
+# TCM giúp điều chỉnh cost matrix dựa trên confidence của track
+TCM_first_step:
+  type: choice
+  default: True
+  options: [True, False]
+
+# Bật/tắt TCM ở bước BYTE matching (low-score detections)
+TCM_byte_step:
+  type: choice
+  default: True
+  options: [True, False]
+
+# Trọng số của TCM trong BYTE step
+TCM_byte_step_weight:
+  type: uniform
+  default: 1.0          # Weight = 1.0 (neutral)
+  range: [0.5, 2.0]     # Từ 0.5 đến 2.0
+
+# Ngưỡng matching cho high-score detections
+# Cặp track-detection có cost > ngưỡng này sẽ không được match
+high_score_matching_thresh:
+  type: uniform
+  default: 0.7          # 70% threshold
+  range: [0.5, 0.9]     # Từ 50% đến 90%
+
+# -----------------------------------------------------------------------------
+# ADAPTIVE FEATURE SAMPLING (AdapFS)
+# -----------------------------------------------------------------------------
+
+# Bật/tắt Adaptive Feature Sampling
+# AdapFS điều chỉnh sampling rate dựa trên độ tin cậy của track
+adapfs:
+  type: choice
+  default: False        # Mặc định tắt
+  options: [True, False]
