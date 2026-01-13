@@ -11,7 +11,7 @@ age_gender = AgeGender()
 test_folder = "test_face_detections"
 
 # Output folder
-output_folder = "output"
+output_folder = "output_face_detections"
 os.makedirs(output_folder, exist_ok=True)
 
 # Get list of image files
