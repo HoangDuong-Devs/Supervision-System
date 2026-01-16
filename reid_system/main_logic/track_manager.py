@@ -456,11 +456,11 @@ class TrackManager:
                 track=track_metadata,
                 stream_id=stream_id,
             )
-            logger.info(f"📸 COMMITTED_PENDING_DATA: track={track_id} gid={global_id} vectors={vectors_committed} crops={crops_written}")
+            logger.debug(f"📸 COMMITTED_PENDING_DATA: track={track_id} gid={global_id} vectors={vectors_committed} crops={crops_written}")
             
             # Then commit the current crop (most recent extract)
             if track_metadata.last_crop is not None and track_metadata.last_person_vector is not None:
-                logger.info(f"💾 SAVING_CURRENT_CROP for newly assigned track={track_id} gid={global_id} crop_shape={track_metadata.last_crop.shape}")
+                logger.debug(f"💾 SAVING_CURRENT_CROP for newly assigned track={track_id} gid={global_id} crop_shape={track_metadata.last_crop.shape}")
                 self.metadata_cache.batch_commit_person_vectors(
                     tracks_to_commit=[(track_metadata, track_metadata.last_person_vector)],
                     stream_id=stream_id,
