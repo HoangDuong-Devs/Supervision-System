@@ -36,7 +36,7 @@ import torch
 
 # Setup logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG for more detail
+    level=logging.INFO,  # Changed to INFO to reduce verbosity
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -381,8 +381,12 @@ def run_demo(config: DemoConfig) -> None:
     logger.info("Starting tracking loop... Press 'q' to quit")
     logger.info("=" * 60)
     
+    # Persist global_ids across frames
+    global_ids = {}
+    
     try:
         while True:
+            frame_start_time = time.time()
             ret, frame = cap.read()
             if not ret:
                 break
@@ -409,7 +413,6 @@ def run_demo(config: DemoConfig) -> None:
                 dets = non_max_suppression(pred, conf_thres=config.conf_thres, iou_thres=config.iou_thres)[0]
             
             display_frame = frame.copy()
-            global_ids = {}
             tracked = np.array([])
             
             if dets is not None and len(dets):
@@ -432,64 +435,44 @@ def run_demo(config: DemoConfig) -> None:
                         # =============================================================
                         # Step 3: ReID V2 Demo Pipeline (long-term Global IDs)
                         # =============================================================
-                        # Convert tracked detections to objects format
-                        objects = []
-                        for det in tracked:
-                            if len(det) >= 7:
-                                objects.append({
-                                    'track_id': int(det[4]),
-                                    'id': int(det[4]),  # Alias
-                                    'class': 'person',
-                                    'class_id': int(det[6]) if len(det) > 6 else 0,
-                                    'confidence': float(det[5]),
-                                    'bbox': det[:4].tolist(),  # x1, y1, x2, y2
-                                })
+                        # ONLY process ReID on extraction interval frames
+                        should_extract = (frame_idx % config.extraction_interval == 0)
                         
-                        # Process through ReID System
-                        metadata = {
-                            'frame': frame,
-                            'frame_idx': frame_idx,
-                            'objects': objects,
-                        }
-                        
-                        # DEBUG: Log objects being sent to ReID
-                        if frame_idx % 50 == 0:  # Log every 50 frames
-                            logger.info(f"[DEBUG] Frame {frame_idx}: Sending {len(objects)} objects to ReID")
-                            for i, obj in enumerate(objects[:3]):  # Show first 3
-                                logger.info(f"[DEBUG]   Object {i}: track_id={obj['track_id']}, bbox={obj['bbox']}")
-                        
-                        processed_metadata = process_reid_system(
-                            stream_id="demo",
-                            metadata=metadata,
-                            onnx_model_path=config.onnx_model_path,
-                            company_id="demo",
-                        )
-                        
-                        # DEBUG: Log what we get back
-                        if frame_idx % 50 == 0:
+                        if should_extract:
+                            # Convert tracked detections to objects format
+                            objects = []
+                            for det in tracked:
+                                if len(det) >= 7:
+                                    objects.append({
+                                        'track_id': int(det[4]),
+                                        'id': int(det[4]),  # Alias
+                                        'class': 'person',
+                                        'class_id': int(det[6]) if len(det) > 6 else 0,
+                                        'confidence': float(det[5]),
+                                        'bbox': det[:4].tolist(),  # x1, y1, x2, y2
+                                    })
+                            
+                            # Process through ReID System
+                            metadata = {
+                                'frame': frame,
+                                'frame_idx': frame_idx,
+                                'objects': objects,
+                            }
+                            
+                            processed_metadata = process_reid_system(
+                                stream_id="demo",
+                                metadata=metadata,
+                                onnx_model_path=config.onnx_model_path,
+                                company_id="demo",
+                            )
+                            
+                            # Update global IDs from processed metadata (preserve existing)
                             if processed_metadata and processed_metadata.get('objects'):
-                                logger.info(f"[DEBUG] Frame {frame_idx}: Received {len(processed_metadata['objects'])} objects from ReID")
-                                for i, obj in enumerate(processed_metadata['objects'][:3]):
-                                    gid = obj.get('global_id', 'NONE')
-                                    tid = obj.get('track_id', 'NONE')
-                                    logger.info(f"[DEBUG]   Object {i}: track_id={tid}, global_id={gid}")
-                            else:
-                                logger.info(f"[DEBUG] Frame {frame_idx}: No processed metadata returned")
-                        
-                        # Extract global IDs from processed metadata
-                        global_ids = {}
-                        if processed_metadata and processed_metadata.get('objects'):
-                            for obj in processed_metadata['objects']:
-                                track_id = str(obj.get('track_id', obj.get('id', '')))
-                                global_id = obj.get('global_id')
-                                global_ids[track_id] = global_id
+                                for obj in processed_metadata['objects']:
+                                    track_id = str(obj.get('track_id', obj.get('id', '')))
+                                    global_id = obj.get('global_id')
+                                    global_ids[track_id] = global_id
                                 
-                        # DEBUG: Log final global_ids mapping
-                        if frame_idx % 50 == 0:
-                            assigned_count = len([gid for gid in global_ids.values() if gid is not None])
-                            logger.info(f"[DEBUG] Frame {frame_idx}: Final global_ids mapping: {global_ids}")
-                            logger.info(f"[DEBUG] Frame {frame_idx}: {assigned_count}/{len(global_ids)} tracks have global IDs")
-                        
                         # =============================================================
                         # Step 4: Visualization
                         # =============================================================
@@ -541,6 +524,12 @@ def run_demo(config: DemoConfig) -> None:
                     f"Frame {frame_idx}/{total_frames} | FPS: {avg_fps:.1f} | "
                     f"Tracks: {total_tracks} | GIDs: {assigned_gids}"
                 )
+            
+            # Frame processing time log
+            frame_time = (time.time() - frame_start_time) * 1000  # Convert to ms
+            assigned_gids = len([gid for gid in global_ids.values() if gid is not None]) if 'global_ids' in locals() else 0
+            pending_gids = len([gid for gid in global_ids.values() if gid is None]) if 'global_ids' in locals() else 0
+            logger.info(f"🎯 Frame {frame_idx}: PERF_FRAME_PROCESS: {frame_time:.1f}ms pending={pending_gids} assigned={assigned_gids}")
             
             frame_idx += 1
         

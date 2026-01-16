@@ -9,10 +9,10 @@ import numpy as np
 
 from ..utils.geometry import normalize_to_ltwh, are_bboxes_close, compute_iou
 from ..utils.vector_utils import cosine_similarity_normalized
-from ..demo_config import cfg
+from configs.autocfg import cfg
 from .track_layers import AssignedTrackStore, PendingTrackStore
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 
 class TrackManager:
@@ -337,21 +337,9 @@ class TrackManager:
                 margin = winner_filtered_avg - second_avg
                 if margin >= self.EARLY_EXIT_MARGIN:
                     early_exit = True
+                    
 
-        # Build topk for logging
-        topk_list = []
-        if agg:
-            sorted_agg = sorted(agg.items(), key=lambda x: x[1], reverse=True)[:5]  # Top 5 by vote count
-            for gid, vote_count in sorted_agg:
-                avg_str = f"avg={filtered_avgs.get(gid, 0.0):.3f}"
-                ratio_str = f"ratio={ratio_map.get(gid, 0.0):.3f}"
-                track_id_str = gid_to_track.get(gid, "unknown") if gid_to_track else "unknown"
-                topk_list.append((gid, vote_count, avg_str, ratio_str, track_id_str))
 
-        winner_track = gid_to_track.get(winner_gid, "unknown") if gid_to_track and winner_gid else winner_gid
-        winner_display = f"{winner_gid}(track={winner_track})" if winner_track and winner_track != winner_gid else winner_gid
-
-        logger.info(f"🗳️ Vote aggregates | stream_id={stream_id} track_id={track_id} winner={winner_display} ratio={ratio:.3f} total={total_votes} window_fill={window_fill:.2f} vote_count={total_votes} early_exit={early_exit} topk={topk_list}")
 
         return {
             "agg": agg,
@@ -448,25 +436,6 @@ class TrackManager:
             payload=payload,
             pending_snapshot=pending_snapshot,
         )
-        
-        # 💾 Commit vector & crop history from PENDING phase
-        if track_metadata is not None:
-            # Commit vectors AND crops together (vectors first to get indices)
-            vectors_committed, crops_written = self.metadata_cache.commit_vector_and_crop_history(
-                track=track_metadata,
-                stream_id=stream_id,
-            )
-            logger.info(f"📸 COMMITTED_PENDING_DATA: track={track_id} gid={global_id} vectors={vectors_committed} crops={crops_written}")
-            
-            # Then commit the current crop (most recent extract)
-            if track_metadata.last_crop is not None and track_metadata.last_person_vector is not None:
-                logger.info(f"💾 SAVING_CURRENT_CROP for newly assigned track={track_id} gid={global_id} crop_shape={track_metadata.last_crop.shape}")
-                self.metadata_cache.batch_commit_person_vectors(
-                    tracks_to_commit=[(track_metadata, track_metadata.last_person_vector)],
-                    stream_id=stream_id,
-                    reason="assignment_current_crop",
-                )
-        
         self.pending_store.reset_vector_stats(stream_id, track_id)
 
     def _filter_inactive_assigned(
@@ -655,16 +624,11 @@ class TrackManager:
                 tracks_needing_pools.append(track_id)
             else:
                 # Extract and prune existing pool
-                initial_pool_ids = [str(e.get("track_id")) for e in short_pool_entries if e.get("track_id")]
-                pool_ids = [tid for tid in initial_pool_ids if tid not in active_set and tid not in retired_set]
+                pool_ids = [str(e.get("track_id")) for e in short_pool_entries if e.get("track_id")]
+                pool_ids = [tid for tid in pool_ids if tid not in active_set and tid not in retired_set]
                 track_to_pool[track_id] = pool_ids
                 all_pool_track_ids.update(pool_ids)
                 tracks_with_pools.append(track_id)
-                
-                # Log short pool processing
-                initial_count = len(initial_pool_ids)
-                pruned_count = initial_count - len(pool_ids)
-                logger.info(f"🏊 SHORT_POOL: track={track_id} initial={initial_count} pruned={pruned_count} final={len(pool_ids)} pool={pool_ids}")
             
             # Build Stage 2 search query for this track
             stage2_queries[track_id] = {
@@ -738,7 +702,7 @@ class TrackManager:
                     stream_id=stream_id
                 )
                 
-                logger.info(f"📦 BATCH_VECTOR_FETCH Stage1: unique_pool_tracks={len(all_pool_track_ids)} fetched={len(batch_pool_vectors)}")
+                
                 
                 # Distribute vectors to each track's cache
                 for track_id, pool_ids in track_to_pool.items():
@@ -763,8 +727,6 @@ class TrackManager:
                     for tid, q in stage2_queries.items()
                 ]
                 precomputed_matches = self.vector_store.batch_search_flat(queries_list)
-                
-                logger.info(f"🔍 BATCH_SEARCH Stage2: queries={len(queries_list)} tracks_with_results={len(precomputed_matches)}")
                 
                 # Post-filter: Remove excluded tracks from results
                 for tid, query_data in stage2_queries.items():
@@ -911,9 +873,9 @@ class TrackManager:
         RECENT_LOST_FRAMES = cfg.SUPERVISION_SYSTEM.STAGE1.KALMAN_MAX_MISSING_FRAMES
         IOU_RECENT_LOST = cfg.SUPERVISION_SYSTEM.STAGE1.IOU_THRESHOLD
         
-        # Flat search base threshold (used for similarity filtering in both stages)
-        FLAT_SEARCH_THRESHOLD = cfg.SUPERVISION_SYSTEM.SEARCH.HNSW_SCORE_THRESHOLD
-        FLAT_SEARCH_MIN_SIM = FLAT_SEARCH_THRESHOLD  # Used for flat search similarity filtering
+        # HNSW base threshold
+        HNSW_SCORE_THRESHOLD = cfg.SUPERVISION_SYSTEM.SEARCH.HNSW_SCORE_THRESHOLD
+        MIN_SIM_FILTER = HNSW_SCORE_THRESHOLD
         
         # Stage 1 (Motion-based)
         SIMILARITY_THRESH_STAGE1 = cfg.SUPERVISION_SYSTEM.STAGE1.SIMILARITY_THRESHOLD
@@ -1039,7 +1001,6 @@ class TrackManager:
         
         if short_pool_track_ids and pool_vectors_cache:
             candidates_stage1 = self._compute_stage1_candidates_from_cache(
-                track_id=track_id,
                 body_vector=body_vector,
                 pool_track_ids=short_pool_track_ids,
                 vectors_cache=pool_vectors_cache,
@@ -1047,7 +1008,7 @@ class TrackManager:
                 similarity_threshold=SIMILARITY_THRESH_STAGE1,  # 0.78
                 active_set=active_set,
                 retired_set=retired_set,
-                min_sim_filter=FLAT_SEARCH_MIN_SIM,  # 0.70 directly
+                min_sim_filter=MIN_SIM_FILTER,  # 0.70 directly
                 weight_max=FINAL_SCORE_MAX_WEIGHT,
             )
             # Lưu track_ids từ Stage 1 để loại khỏi Stage 2
@@ -1085,9 +1046,6 @@ class TrackManager:
         
         # Log all track_ids từ HNSW search (trước khi filter)
         stage2_all_track_ids = [str(e.get("track_id", "")) for e in stage2_entries]
-        unique_track_ids = list(set(stage2_all_track_ids))
-        total_snapshots = len(stage2_entries)
-        logger.info(f"📊 STAGE2_FLAT_SEARCH_RESULTS: track={track_id} total_snapshots={total_snapshots} unique_track_ids={unique_track_ids[:5]}")  # Show first 5
         
         
         # Filter by Stage 2 threshold VÀ loại track_ids đã có ở Stage 1
@@ -1095,7 +1053,7 @@ class TrackManager:
         for cand in stage2_entries:
             cand_track_id = str(cand.get("track_id", ""))
             cand_gid = cand.get("global_id", "?")
-            hnsw_score = float(cand.get("score", 0.0))
+            score = float(cand.get("score", 0.0))
             
             # Skip nếu track_id đã có trong Stage 1
             if cand_track_id in stage1_track_ids:
@@ -1104,65 +1062,16 @@ class TrackManager:
                     logged_track_ids.add(cand_track_id)
                 continue
             
-            # Tính detailed score từ vectors như Stage 1
-            vectors_data = self.vector_store.get_vectors_for_tracks([cand_track_id], stream_id).get(cand_track_id, {})
-            vectors = vectors_data.get("vectors", [])
-            
-            if vectors:
-                # DEBUG: Check vector norms and first values
-                body_norm = np.linalg.norm(body_vector)
-                vec_norms = [np.linalg.norm(vec) for vec in vectors[:3]]
-                body_first5 = body_vector[:5]
-                vec_first5 = [vec[:5] for vec in vectors[:3]]
-                logger.info(f"🔍 STAGE2_VECS: track={cand_track_id} body_norm={body_norm:.4f} body_first5={body_first5} ram_norms={vec_norms} ram_first5={vec_first5}")
-                
-                # Direct dot product (vectors already L2-normalized)
-                all_similarities = [np.dot(body_vector, vec) for vec in vectors]
-                
-                # DEBUG: Manual dot product check for first vector
-                if len(vectors) > 0:
-                    manual_dot = sum(body_vector[i] * vectors[0][i] for i in range(len(body_vector)))
-                    auto_dot = all_similarities[0]
-                    logger.info(f"🧮 DOT_CHECK: manual={manual_dot:.6f} numpy={auto_dot:.6f} diff={abs(manual_dot-auto_dot):.8f}")
-                
-                valid_similarities = [s for s in all_similarities if s >= FLAT_SEARCH_MIN_SIM]
-                similarities = valid_similarities if valid_similarities else all_similarities
-                
-                if similarities:
-                    max_sim = max(similarities)
-                    avg_sim = sum(similarities) / len(similarities)
-                    final_score = FINAL_SCORE_MAX_WEIGHT * max_sim + (1 - FINAL_SCORE_MAX_WEIGHT) * avg_sim
+            if score >= SIMILARITY_THRESH_STAGE2:  # 0.85
+                cand["stage"] = "appearance"
+                candidates_stage2.append(cand)
+                if cand_track_id not in logged_track_ids:
                     
-                    # Log với detailed info
-                    sim_sorted = sorted(all_similarities, reverse=True)[:5]
-                    valid_count = len(valid_similarities)
-                    total_count = len(all_similarities)
-                    
-                    if final_score >= SIMILARITY_THRESH_STAGE2:
-                        cand["stage"] = "appearance"
-                        cand["score"] = final_score  # Update với final score
-                        candidates_stage2.append(cand)
-                        logger.info(f"📊 STAGE2_SCORE: tid={cand_track_id} gid={cand_gid} PASSED final={final_score:.3f} >= threshold={SIMILARITY_THRESH_STAGE2:.3f} (max={max_sim:.3f} avg={avg_sim:.3f} valid={valid_count}/{total_count}) all_sims={sim_sorted}")
-                    else:
-                        logger.info(f"📊 STAGE2_SCORE: tid={cand_track_id} gid={cand_gid} REJECTED final={final_score:.3f} < threshold={SIMILARITY_THRESH_STAGE2:.3f} (max={max_sim:.3f} avg={avg_sim:.3f} valid={valid_count}/{total_count}) all_sims={sim_sorted}")
-                else:
-                    # Fallback to HNSW score
-                    if hnsw_score >= SIMILARITY_THRESH_STAGE2:
-                        cand["stage"] = "appearance"
-                        candidates_stage2.append(cand)
-                        logger.info(f"📊 STAGE2_SCORE: tid={cand_track_id} gid={cand_gid} PASSED score={hnsw_score:.3f} >= threshold={SIMILARITY_THRESH_STAGE2:.3f} (HNSW fallback)")
-                    else:
-                        logger.info(f"📊 STAGE2_SCORE: tid={cand_track_id} gid={cand_gid} REJECTED score={hnsw_score:.3f} < threshold={SIMILARITY_THRESH_STAGE2:.3f} (HNSW fallback)")
+                    logged_track_ids.add(cand_track_id)
             else:
-                # No vectors available, use HNSW score
-                if hnsw_score >= SIMILARITY_THRESH_STAGE2:
-                    cand["stage"] = "appearance"
-                    candidates_stage2.append(cand)
-                    logger.info(f"📊 STAGE2_SCORE: tid={cand_track_id} gid={cand_gid} PASSED score={hnsw_score:.3f} >= threshold={SIMILARITY_THRESH_STAGE2:.3f} (HNSW)")
-                else:
-                    logger.info(f"📊 STAGE2_SCORE: tid={cand_track_id} gid={cand_gid} REJECTED score={hnsw_score:.3f} < threshold={SIMILARITY_THRESH_STAGE2:.3f} (HNSW)")
-            
-            logged_track_ids.add(cand_track_id)
+                if cand_track_id not in logged_track_ids:
+                    
+                    logged_track_ids.add(cand_track_id)
         
         # ================================================================
         # MERGE: Union Stage 1 + Stage 2
@@ -1203,15 +1112,12 @@ class TrackManager:
         gid_to_track = {gid: meta.get("track_id") for gid, meta in candidate_meta.items()}
         gid_to_meta = candidate_meta
 
-        # Log merged candidates (after dedupe by global_id)
+        # Log voting candidates
         if candidates_list:
             top_candidates_display = [
-                f"{gid}(track={gid_to_track.get(gid, 'unknown')},score={score:.3f},stage={gid_to_meta.get(gid, {}).get('stage', 'unknown')})"
+                f"{gid}(track={gid_to_track.get(gid, 'unknown')},score={score:.3f})"
                 for gid, score in candidates_list[:5]  # Show top 5
             ]
-            logger.info(f"🎯 CANDIDATES: track={track_id} total_unique={len(candidate_meta)} (stage1={len(candidates_stage1)} + stage2={len(candidates_stage2)}) top_candidates={top_candidates_display}")
-        else:
-            logger.info(f"🎯 CANDIDATES: track={track_id} total_unique={len(candidate_meta)} (stage1={len(candidates_stage1)} + stage2={len(candidates_stage2)}) top_candidates=[]")
             
 
         best_score = 0.0
@@ -1296,9 +1202,6 @@ class TrackManager:
                     return context
             
             # Case 3: Continue voting (window not full yet, no early exit, no timeout)
-            winner_track = gid_to_track.get(winner_gid, "unknown") if winner_gid else None
-            winner_display = f"{winner_gid}(track={winner_track})" if winner_track else winner_gid
-            logger.info(f"⏳ PENDING voting: track={track_id} votes={vote_count}/{self.VOTE_WINDOW_SIZE} winner={winner_display} ratio={winner_ratio:.3f} avg={winner_filtered_avg:.3f} consensus={has_consensus} early_exit={early_exit} candidates={len(candidates_list)}")
             context["status"] = "pending"
             context["assignment_info"] = {
                 "global_id": None,
@@ -1463,9 +1366,10 @@ class TrackManager:
                 history_count = len(track_metadata.person_vector_history)
                 
                 if history_count > 0:
-                    self.metadata_cache.commit_vector_and_crop_history(
+                    self.metadata_cache.commit_person_vector_history(
                         track=track_metadata,
                         stream_id=stream_id,
+                        reason="assignment_final",
                     )
                 
                 # Only commit last_person_vector if NOT already committed via history
@@ -1490,8 +1394,6 @@ class TrackManager:
             global_id=global_id,
             track_metadata=track_metadata,
         )
-
-        logger.info(f"✅ GLOBAL_ID_CONFIRMED track={track_id} gid={global_id} score={best_score:.4f}")
 
         return {
             "global_id": global_id,
@@ -1557,8 +1459,6 @@ class TrackManager:
             global_id=new_global_id,
             track_metadata=track_metadata,
         )
-
-        logger.info(f"🆕 GLOBAL_ID_ASSIGNED_NEW track={track_id} gid={new_global_id} score={best_score:.4f}")
 
         return {
             "global_id": new_global_id,
@@ -1631,7 +1531,6 @@ class TrackManager:
 
     def _compute_stage1_candidates_from_cache(
         self,
-        track_id: str,
         body_vector: np.ndarray,
         pool_track_ids: List[str],
         vectors_cache: Dict[str, Dict[str, Any]],
@@ -1692,26 +1591,11 @@ class TrackManager:
                 
                 continue
             
-            # DEBUG: Check vector norms and values
-            body_norm = np.linalg.norm(body_vector)
-            vec_norms = [np.linalg.norm(vec) for vec in vectors[:3]]
-            body_first5 = body_vector[:5]
-            vec_first5 = [vec[:5] for vec in vectors[:3]]
-            body_dtype = body_vector.dtype
-            vec_dtypes = [vec.dtype for vec in vectors[:3]]
-            logger.info(f"🔍 STAGE1_VECS: query_track={track_id} candidate_track={track_id_str} body_norm={body_norm:.4f} body_dtype={body_dtype} body_first5={body_first5}")
-            logger.info(f"🔍 STAGE1_CACHED: candidate_track={track_id_str} num_vectors={len(vectors)} cached_norms={vec_norms} cached_dtypes={vec_dtypes} cached_first5={vec_first5}")
-            
-            # Direct dot product (vectors already L2-normalized)
+            # Tính similarity với TẤT CẢ vectors, filter bởi min_sim_filter
             all_similarities = []
             valid_similarities = []
-            for idx, vec in enumerate(vectors):
-                sim = np.dot(body_vector, vec)  # Direct dot product, no normalization needed
-                
-                # DEBUG: Log first 3 similarities with detailed info
-                if idx < 3:
-                    logger.info(f"🧮 SIM_CALC[{idx}]: dot_product={sim:.6f} body_norm={body_norm:.4f} vec_norm={vec_norms[idx] if idx < len(vec_norms) else 'N/A':.4f}")
-                
+            for vec in vectors:
+                sim = cosine_similarity_normalized(body_vector, vec)
                 all_similarities.append(sim)
                 if sim >= min_sim_filter:  # 0.7 - loại vectors lỗi (occlusion, blur)
                     valid_similarities.append(sim)
@@ -1732,11 +1616,10 @@ class TrackManager:
             
             # Log the score comparison
             if final_score < similarity_threshold:
-                # Show top 5 similarities for debugging (sorted descending)
-                sim_sorted = sorted(all_similarities, reverse=True)[:5]
-                valid_count = len(valid_similarities)
-                total_count = len(all_similarities)
-                logger.info(f"[TrackManager] STAGE1_SCORE: tid={track_id_str} gid={global_id} REJECTED final={final_score:.3f} < threshold={similarity_threshold:.3f} (max={max_sim:.3f} avg={avg_sim:.3f} valid={valid_count}/{total_count}) all_sims={sim_sorted}")
+                # Show all individual similarities for debugging
+                sim_sorted = sorted(all_similarities, reverse=True)
+                cached_uuids = data.get("uuids", [])
+                
                 continue
             
             if not global_id:
@@ -1744,10 +1627,6 @@ class TrackManager:
                 continue
             
             # PASSED
-            sim_sorted = sorted(all_similarities, reverse=True)[:5]
-            valid_count = len(valid_similarities)
-            total_count = len(all_similarities)
-            logger.info(f"📈 STAGE1_SCORE: tid={track_id_str} gid={global_id} PASSED final={final_score:.3f} >= threshold={similarity_threshold:.3f} (max={max_sim:.3f} avg={avg_sim:.3f} valid={valid_count}/{total_count}) all_sims={sim_sorted}")
             
             
             payload = data.get("payload", {})
@@ -1920,12 +1799,7 @@ class TrackManager:
         try:
             # Use snapshot_limit from vector_store as source of truth
             N = self.vector_store.snapshot_limit
-            
-            # Get actual current vector count from vector_store (after history commit)
-            current_key = f"{current_stream_id}:{current_track_id}"
-            current_vector_count = len(self.vector_store.track_to_indices.get(current_key, []))
-            
-            m = current_vector_count
+            m = new_track_vector_count
             half_N = N // 2
             
             if m <= half_N:
@@ -1946,8 +1820,7 @@ class TrackManager:
                 # Use cached vectors if provided (from Stage 1/Stage 2)
                 if cached_vectors:
                     # Apply similarity filter to get quality vectors
-                    FLAT_SEARCH_MIN_SIM = cfg.SUPERVISION_SYSTEM.SEARCH.HNSW_SCORE_THRESHOLD
-                    MIN_SIM_FILTER = FLAT_SEARCH_MIN_SIM
+                    MIN_SIM_FILTER = cfg.SUPERVISION_SYSTEM.STAGE1.SIMILARITY_THRESHOLD
                     transferred, _ = self.vector_store.transfer_vectors_from_cache(
                         from_track_id=candidate_track_id_str,
                         to_track_id=str(current_track_id),
@@ -1972,14 +1845,10 @@ class TrackManager:
             if isinstance(transferred, tuple):
                 transferred = transferred[0]
             
-            # Calculate total vectors after transfer
-            total_vectors_after_transfer = current_vector_count + transferred
+            
             
             if track_metadata is not None:
-                # Set _vectors_to_keep to total vectors after transfer
-                # This allows FIFO to continue working up to snapshot_limit
-                track_metadata._vectors_to_keep = total_vectors_after_transfer
-                logger.info(f"🔄 TRANSFER_COMPLETE: track={current_track_id} gid={new_global_id} vectors_before={current_vector_count} transferred={transferred} total={total_vectors_after_transfer} _vectors_to_keep={track_metadata._vectors_to_keep}")
+                track_metadata._vectors_to_keep = keep_new
             
             self.vector_store.retire_track(candidate_stream_id_str, candidate_track_id_str)
             

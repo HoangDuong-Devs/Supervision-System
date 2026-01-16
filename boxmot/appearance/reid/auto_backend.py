@@ -3,7 +3,7 @@ from typing import Tuple, Union
 
 import torch
 
-from boxmot.appearance.backends.onnx_backend import ONNXBackend
+# from boxmot.appearance.backends.onnx_backend import ONNXBackend  # DISABLED: DLL issues
 from boxmot.appearance.backends.openvino_backend import OpenVinoBackend
 from boxmot.appearance.backends.pytorch_backend import PyTorchBackend
 from boxmot.appearance.backends.tensorrt_backend import TensorRTBackend
@@ -70,7 +70,7 @@ class ReidAutoBackend:
         backend_map = {
             self.pt: PyTorchBackend,
             self.jit: TorchscriptBackend,
-            self.onnx: ONNXBackend,
+            # self.onnx: ONNXBackend,  # DISABLED: DLL issues
             self.engine: TensorRTBackend,
             self.xml: OpenVinoBackend,
             self.tflite: TFLiteBackend,

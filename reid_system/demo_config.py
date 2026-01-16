@@ -13,47 +13,48 @@ logger = logging.getLogger(__name__)
 
 class MockConfig:
     """Mock config to match cfg.SUPERVISION_SYSTEM structure."""
-    
+
     def __init__(self):
         # SUPERVISION_SYSTEM.REID config
         self.REID = MockREIDConfig()
-        
-        # SUPERVISION_SYSTEM.VOTING config  
+
+        # SUPERVISION_SYSTEM.VOTING config
         self.VOTING = MockVotingConfig()
-        
+
         # SUPERVISION_SYSTEM.TRACK_MANAGER config
         self.TRACK_MANAGER = MockTrackManagerConfig()
-        
+
         # SUPERVISION_SYSTEM.STAGE1 config (for Kalman filter)
         self.STAGE1 = MockStage1Config()
-        
+
         # SUPERVISION_SYSTEM.STAGE2 config (for advanced matching)
         self.STAGE2 = MockStage2Config()
-        
+
         # SUPERVISION_SYSTEM.SEARCH config (for HNSW search)
         self.SEARCH = MockSearchConfig()
 
 class MockREIDConfig:
     """Mock REID config."""
-    
+
     def __init__(self):
         self.MODEL = MockModelConfig()
         self.EXTRACTION_INTERVAL_FRAMES = 5
         self.RAM_CAPACITY = 50000
         self.SNAPSHOT_HISTORY_LIMIT = 20
+        self.UPSERT_INTERVAL_ASSIGNED_FRAMES = 5  # Save crops every 5 frames
 
 class MockModelConfig:
     """Mock model config."""
-    
+
     def __init__(self):
         self.NAME = "osnet_msmt17_engine"
         self.VERSION = "1"
 
 class MockVotingConfig:
     """Mock voting config."""
-    
+
     def __init__(self):
-        self.WINDOW_SIZE = 10
+        self.WINDOW_SIZE = 7
         self.TOPK_PER_VOTE = 3
         self.SCORE_FILTER = 0.65
         self.EARLY_EXIT_ENABLED = True
@@ -83,22 +84,22 @@ class MockStage1Config:
         self.KALMAN_MAX_AGE = 60  # Max age for Kalman predictions
         self.IOU_THRESHOLD = 0.3  # IOU threshold for matching tracks
         self.POOL_SIZE = 100  # Pool size for track matching
-        self.SIMILARITY_THRESHOLD = 0.5  # Similarity threshold for ReID matching
+        self.SIMILARITY_THRESHOLD = 0.78  # Similarity threshold for ReID matching
 
 class MockStage2Config:
     """Mock Stage2 config for advanced matching settings."""
     def __init__(self):
-        self.SIMILARITY_THRESHOLD = 0.6  # Stage 2 similarity threshold for advanced matching
+        self.SIMILARITY_THRESHOLD = 0.85  # Stage 2 similarity threshold for advanced matching
 
 class MockSearchConfig:
     """Mock Search config for HNSW search settings."""
     def __init__(self):
-        self.HNSW_SCORE_THRESHOLD = 0.5  # HNSW search score threshold
-        self.FINAL_SCORE_MAX_WEIGHT = 0.7  # Final score max weight for search
+        self.HNSW_SCORE_THRESHOLD = 0.7  # HNSW search score threshold
+        self.FINAL_SCORE_MAX_WEIGHT = 0.75  # Final score max weight for search
 
 class MockMainConfig:
     """Mock main config object."""
-    
+
     def __init__(self):
         self.SUPERVISION_SYSTEM = MockConfig()
 

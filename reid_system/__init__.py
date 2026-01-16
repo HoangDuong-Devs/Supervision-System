@@ -1,12 +1,9 @@
 # reid_system/__init__.py
 
-# =============================================================================
-# REID_SYSTEM - Long-term Person Re-Identification (ONNX Backend)
-# =============================================================================
-# Flow-based ReID system with ONNX inference.
-
-# Main entry point  
-from .reid_processor import process_reid_system, stop_reid_system, stop_all_reid_system
+"""
+REID_SYSTEM - Long-term Person Re-Identification (ONNX Backend)
+Flow-based ReID system with ONNX inference.
+"""
 
 # Core business logic
 from .main_logic.pipeline import ReIDPipeline
@@ -28,30 +25,25 @@ from .utils.geometry import normalize_to_ltwh, are_bboxes_close, compute_iou
 from .utils.vector_utils import cosine_similarity_normalized
 
 __all__ = [
-    # Main entry
-    "process_reid_system",
-    "stop_reid_system", 
-    "stop_all_reid_system",
-    
     # Core
-    "ReIDPipeline", 
+    "ReIDPipeline",
     "TrackManager",
     "PendingTrackStore",
     "AssignedTrackStore",
-    
+
     # Models
     "TrackMetadata",
-    
+
     # Inference
     "ReIDFeatureExtractor",
-    
+
     # Storage
     "RAMVectorStore",
     "TrackMetadataCache",
-    
+
     # Utils
     "normalize_to_ltwh",
-    "are_bboxes_close", 
+    "are_bboxes_close",
     "compute_iou",
     "cosine_similarity_normalized",
 ]

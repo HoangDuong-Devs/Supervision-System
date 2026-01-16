@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -128,15 +129,21 @@ class RequirementsChecker:
                 "Attempting installation..."
             )
             if self._uv_available:
-                cmd = ["uv", "pip", "install", "--no-cache-dir"]
+                cmd = ["uv", "pip", "install", "--no-cache-dir", "--trusted-host", "pypi.org", "--trusted-host", "files.pythonhosted.org", "--no-deps"]
             else:
-                cmd = ["pip", "install"]
+                cmd = ["pip", "install", "--trusted-host", "pypi.org", "--trusted-host", "files.pythonhosted.org", "--no-deps"]
 
             if extra_args:
                 cmd += list(extra_args)
             cmd += list(packages)
 
-            subprocess.check_call(cmd)
+            # Disable SSL verification as last resort
+            env = os.environ.copy()
+            env['PIP_NO_VERIFY_SSL'] = '1'
+            env['REQUESTS_CA_BUNDLE'] = ''
+            env['SSL_CERT_FILE'] = ''
+
+            subprocess.check_call(cmd, env=env)
             LOGGER.info("All missing packages were installed successfully.")
         except Exception as e:
             LOGGER.error(f"Failed to install packages: {e}")

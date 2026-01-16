@@ -10,15 +10,11 @@ Provides high-performance in-memory vector operations:
 """
 
 import logging
-import os
 import threading
 import time
-import uuid
 from collections import deque
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -41,8 +37,6 @@ class RAMVectorStore:
         vector_dim: int = 512,
         snapshot_limit: int = 10,
         company_id: str = "default",
-        enable_crop_storage: bool = True,
-        debug_images_dir: str = "debug_images",
     ):
         """
         Initialize RAM vector store.
@@ -52,8 +46,6 @@ class RAMVectorStore:
             vector_dim: Dimension of each vector (default 512 for ReID)
             snapshot_limit: Max vectors per track (FIFO limit)
             company_id: Company identifier (for logging)
-            enable_crop_storage: Enable saving crop images for debugging
-            debug_images_dir: Root directory for debug images
         """
         self.capacity = capacity
         self.vector_dim = vector_dim
@@ -91,23 +83,6 @@ class RAMVectorStore:
             "fifo_evictions": 0,
         }
         
-        # Visual debugging - crop image storage
-        self.enable_crop_storage = enable_crop_storage
-        self.debug_images_dir = Path(debug_images_dir)
-        
-        if self.enable_crop_storage:
-            # Clean up debug_images folder on restart
-            if self.debug_images_dir.exists():
-                import shutil
-                try:
-                    shutil.rmtree(str(self.debug_images_dir))
-                    logger.info(f"[RAMVectorStore] 🧹 Cleaned debug_images on restart")
-                except Exception as e:
-                    logger.warning(f"[RAMVectorStore] Failed to clean debug_images: {e}")
-            
-            self.debug_images_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"[RAMVectorStore] Crop storage enabled: {self.debug_images_dir.absolute()}")
-        
         
     
     # ----------------------------------------------------------------
@@ -121,7 +96,6 @@ class RAMVectorStore:
         body_vector: np.ndarray,
         metadata: Optional[Dict[str, Any]] = None,
         snapshot_suffix: Optional[str] = None,
-        crop_image: Optional[np.ndarray] = None,
     ) -> bool:
         """
         Add vector snapshot with automatic FIFO eviction.
@@ -132,7 +106,6 @@ class RAMVectorStore:
             body_vector: Feature vector (shape: (512,))
             metadata: Optional metadata dict
             snapshot_suffix: Optional suffix for debugging
-            crop_image: Optional crop image for visual debugging (BGR format)
             
         Returns:
             True if successful
@@ -158,14 +131,6 @@ class RAMVectorStore:
                 # Note: deque will auto-remove oldest when we append
                 # We need to free the index that will be evicted
                 oldest_idx = track_indices[0]  # Will be removed on next append
-                
-                # Delete associated crop image before freeing index
-                if self.enable_crop_storage and self.metadata[oldest_idx]:
-                    old_meta = self.metadata[oldest_idx]
-                    old_matrix_idx = old_meta.get("matrix_index", oldest_idx)
-                    old_gid = old_meta.get("global_id")
-                    self._delete_crop_image(stream_id, track_id, old_gid, old_matrix_idx)
-                
                 self._free_index(oldest_idx)
                 self.stats["fifo_evictions"] += 1
             
@@ -176,24 +141,9 @@ class RAMVectorStore:
             
             new_idx = self.free_indices.popleft()
             
-            # Generate UUID for this vector position in matrix
-            vector_uuid = str(uuid.uuid4())
-            
             # Store vector as-is (already normalized by feature extractor)
             # DO NOT normalize again - would cause mismatch with Qdrant!
             self.vectors[new_idx] = body_vector.astype(np.float32, copy=False)
-            
-            # Save crop image ONLY if track is ASSIGNED (has global_id)
-            # Use matrix index as filename for direct correspondence
-            global_id = metadata.get("global_id") if metadata else None
-            if crop_image is not None and global_id is not None:
-                self._save_crop_image(
-                    crop=crop_image,
-                    stream_id=stream_id,
-                    track_id=track_id,
-                    global_id=global_id,
-                    matrix_index=new_idx,  # Use matrix index as filename
-                )
             
             # Store metadata
             meta = metadata or {}
@@ -202,8 +152,6 @@ class RAMVectorStore:
                 "stream_id": stream_id,
                 "timestamp": time.time(),
                 "suffix": snapshot_suffix,
-                "uuid": vector_uuid,  # UUID for vector position in matrix
-                "matrix_index": new_idx,  # Index in storage matrix (for crop filename)
             })
             self.metadata[new_idx] = meta
             
@@ -373,9 +321,6 @@ class RAMVectorStore:
                 
                 # Collect vectors and metadata
                 vectors = [self.vectors[idx].copy() for idx in indices]
-                
-
-                
                 # Use most recent metadata
                 latest_meta = self.metadata[indices[-1]].copy() if indices else {}
                 global_id = latest_meta.get("global_id")
@@ -391,8 +336,7 @@ class RAMVectorStore:
     
     def retire_track(self, stream_id: str, track_id: str) -> bool:
         """
-        Delete all vectors of a track and associated crop images.
-        Also removes the track folder and cleans up slot counter.
+        Delete all vectors of a track.
         
         Args:
             stream_id: Stream identifier
@@ -407,37 +351,8 @@ class RAMVectorStore:
             indices = self.track_to_indices.get(key, deque())
             
             if not indices:
-                return True
-            
-            # Get global_id for folder cleanup
-            global_id = None
-            if indices and self.metadata[indices[0]]:
-                global_id = self.metadata[indices[0]].get("global_id")
-            
-            # Delete crop images and folder
-            if self.enable_crop_storage:
-                # Delete individual crop files
-                for idx in indices:
-                    if self.metadata[idx]:
-                        meta = self.metadata[idx]
-                        matrix_idx = meta.get("matrix_index", idx)
-                        curr_gid = meta.get("global_id")
-                        self._delete_crop_image(stream_id, track_id, curr_gid, matrix_idx)
                 
-                # Delete entire track folder
-                try:
-                    track_folder = self._get_track_folder_path(stream_id, track_id, global_id)
-                    if track_folder.exists():
-                        import shutil
-                        shutil.rmtree(str(track_folder))
-                        logger.info(f"[RAMVectorStore] 🗑️ Deleted track folder on retire: {track_folder.relative_to(self.debug_images_dir)}")
-                        
-                        # Clean up empty stream folder
-                        stream_folder = track_folder.parent
-                        if stream_folder.exists() and not any(stream_folder.iterdir()):
-                            stream_folder.rmdir()
-                except Exception as e:
-                    logger.warning(f"[RAMVectorStore] Failed to delete track folder: {e}")
+                return True
             
             # Free all indices
             for idx in indices:
@@ -447,6 +362,8 @@ class RAMVectorStore:
             del self.track_to_indices[key]
             
             self.stats["deletes"] += 1
+            
+            
         
         return True
     
@@ -480,7 +397,6 @@ class RAMVectorStore:
     ) -> Tuple[int, List[int]]:
         """
         Transfer vectors from one track to another by copying.
-        Also handles renaming crop image folders when global_id changes.
         
         Args:
             from_track_id: Source track
@@ -504,14 +420,12 @@ class RAMVectorStore:
             if not source_indices:
                 return 0, []
             
-            # Take latest vectors from source (from end = newest)
-            # Simple logic: get last N vectors (most recent)
+            # Sample indices (interleaved for diversity)
             if len(source_indices) > max_vectors:
-                indices_to_copy = source_indices[-max_vectors:]  # Take from end (latest)
-                logger.info(f"📤 TRANSFER: {from_key} → {to_key}, taking {max_vectors} latest from {len(source_indices)} total")
+                step = len(source_indices) / max_vectors
+                indices_to_copy = [source_indices[int(i * step)] for i in range(max_vectors)]
             else:
                 indices_to_copy = source_indices
-                logger.info(f"📤 TRANSFER: {from_key} → {to_key}, taking all {len(source_indices)} vectors")
             
             # Initialize target track if needed
             if to_key not in self.track_to_indices:
@@ -530,14 +444,6 @@ class RAMVectorStore:
                 # Handle FIFO eviction if target is full
                 if len(target_indices) >= self.snapshot_limit:
                     oldest_idx = target_indices[0]
-                    
-                    # Delete old crop image if exists
-                    if self.enable_crop_storage and self.metadata[oldest_idx]:
-                        old_meta = self.metadata[oldest_idx]
-                        old_matrix_idx = old_meta.get("matrix_index", oldest_idx)
-                        old_gid = old_meta.get("global_id")
-                        self._delete_crop_image(stream_id, to_track_id, old_gid, old_matrix_idx)
-                    
                     self._free_index(oldest_idx)
                     self.stats["fifo_evictions"] += 1
                 
@@ -548,47 +454,13 @@ class RAMVectorStore:
                 self.vectors[new_idx] = self.vectors[src_idx].copy()
                 
                 # Copy and update metadata
-                src_meta = self.metadata[src_idx]
-                new_meta = src_meta.copy() if src_meta else {}
-                old_gid = new_meta.get("global_id")
-                
+                new_meta = self.metadata[src_idx].copy()
                 new_meta["track_id"] = to_track_id
                 new_meta["transferred_from"] = from_track_id
                 new_meta["transfer_timestamp"] = time.time()
                 if to_global_id:
                     new_meta["global_id"] = to_global_id
                     new_meta["state"] = "ASSIGNED"
-                
-                # Copy crop image if source has one
-                if self.enable_crop_storage and src_meta and old_gid:
-                    src_matrix_idx = src_meta.get("matrix_index", src_idx)
-                    # Build source crop path
-                    src_track_folder = self._get_track_folder_path(stream_id, from_track_id, old_gid)
-                    src_crop_path = src_track_folder / f"{src_matrix_idx}.jpg"
-                    
-                    if src_crop_path.exists():
-                        # Save to new location with new global_id and matrix_index
-                        try:
-                            import cv2
-                            crop_img = cv2.imread(str(src_crop_path))
-                            if crop_img is not None and to_global_id:
-                                self._save_crop_image(
-                                    crop=crop_img,
-                                    stream_id=stream_id,
-                                    track_id=to_track_id,
-                                    global_id=to_global_id,
-                                    matrix_index=new_idx,
-                                )
-                                logger.info(f"📋 RETIRED_TRANSFER_CROP: {from_track_id}_{old_gid}/{src_matrix_idx}.jpg → {to_track_id}_{to_global_id}/{new_idx}.jpg")
-                            else:
-                                logger.warning(f"❌ CROP_LOAD_FAILED: {src_crop_path}")
-                        except Exception as e:
-                            logger.warning(f"Failed to copy crop during transfer: {e}")
-                    else:
-                        logger.debug(f"⚠️ CROP_NOT_FOUND: {src_crop_path}")
-                
-                # Update matrix_index to new position
-                new_meta["matrix_index"] = new_idx
                 
                 self.metadata[new_idx] = new_meta
                 
@@ -599,6 +471,8 @@ class RAMVectorStore:
                 new_indices.append(new_idx)
             
             self.stats["transfers"] += 1
+            
+            
         
         return len(new_indices), new_indices
     
@@ -615,7 +489,6 @@ class RAMVectorStore:
     ) -> bool:
         """
         Update global_id in metadata for all vectors of a track.
-        Also renames the crop folder if crop storage is enabled.
         
         Args:
             track_id: Track identifier
@@ -631,28 +504,16 @@ class RAMVectorStore:
         with self._lock:
             indices = self.track_to_indices.get(key, deque())
             if not indices:
+                
                 return False
-            
-            # Get old global_id from first vector
-            old_global_id = None
-            if indices and self.metadata[indices[0]]:
-                old_global_id = self.metadata[indices[0]].get("global_id")
-            
-            # Rename crop folder if global_id changed and crop storage enabled
-            if self.enable_crop_storage and old_global_id != global_id:
-                self._rename_track_folder(
-                    stream_id=stream_id,
-                    old_track_id=track_id,
-                    new_track_id=track_id,
-                    old_global_id=old_global_id,
-                    new_global_id=global_id,
-                )
             
             # Update metadata for all vectors of this track
             for idx in indices:
                 if self.metadata[idx]:
                     self.metadata[idx]["global_id"] = global_id
                     self.metadata[idx]["state"] = state
+            
+            
         
         return True
     
@@ -662,7 +523,6 @@ class RAMVectorStore:
         stream_id: str,
         vectors_with_suffixes: List[Tuple[np.ndarray, str]],
         metadata: Optional[Dict[str, Any]] = None,
-        crop_image: Optional[np.ndarray] = None,
     ) -> int:
         """
         Batch upsert multiple snapshots for a track (Qdrant-compatible API).
@@ -672,7 +532,6 @@ class RAMVectorStore:
             stream_id: Stream ID
             vectors_with_suffixes: List of (vector, suffix) tuples
             metadata: Optional metadata to attach to all points
-            crop_image: Optional crop image to save with first vector (for ASSIGNED tracks)
             
         Returns:
             Number of successfully upserted snapshots
@@ -681,13 +540,10 @@ class RAMVectorStore:
             return 0
         
         count = 0
-        for idx, (vector, suffix) in enumerate(vectors_with_suffixes):
+        for vector, suffix in vectors_with_suffixes:
             # Merge metadata
             full_metadata = metadata.copy() if metadata else {}
             full_metadata["suffix"] = suffix
-            
-            # Pass crop only for first vector
-            crop_for_this = crop_image if idx == 0 else None
             
             success = self.upsert_snapshot(
                 track_id=track_id,
@@ -695,7 +551,6 @@ class RAMVectorStore:
                 body_vector=vector,
                 metadata=full_metadata,
                 snapshot_suffix=suffix,
-                crop_image=crop_for_this,
             )
             if success:
                 count += 1
@@ -865,7 +720,6 @@ class RAMVectorStore:
             vector = entry.get("vector")
             global_id = entry.get("global_id")
             metadata = entry.get("metadata") or {}
-            crop_image = entry.get("crop_image")  # Get crop if provided
             
             if not track_id or vector is None:
                 continue
@@ -884,7 +738,6 @@ class RAMVectorStore:
                 stream_id=stream_id,
                 body_vector=vector_array,
                 metadata=full_metadata,
-                crop_image=crop_image,  # Pass crop if available
             )
             
             if success:
@@ -892,30 +745,6 @@ class RAMVectorStore:
         
 
         return success_count
-    
-    def batch_upsert_with_crops(
-        self,
-        entries: List[Dict[str, Any]],
-        stream_id: str,
-    ) -> int:
-        """
-        Batch upsert with crop image support (alias for batch_upsert_multi_tracks).
-        
-        Each entry should contain:
-        - track_id: str
-        - vector: np.ndarray
-        - global_id: Optional[str]
-        - metadata: Optional[Dict]
-        - crop_image: Optional[np.ndarray] (BGR format)
-        
-        Args:
-            entries: List of entry dicts
-            stream_id: Stream identifier
-            
-        Returns:
-            Number of successful upserts
-        """
-        return self.batch_upsert_multi_tracks(entries, stream_id)
     
     def transfer_vectors_from_cache(
         self,
@@ -956,203 +785,4 @@ class RAMVectorStore:
         )
         # Return tuple to match Qdrant signature
         return (count, indices)
-
-    # ----------------------------------------------------------------
-    # Visual Debugging - Crop Image Storage
-    # ----------------------------------------------------------------
-    
-    def _get_track_folder_path(self, stream_id: str, track_id: str, global_id: Optional[str] = None) -> Path:
-        """
-        Get folder path for track's crop images.
-        
-        Format: debug_images/{stream_id}/{track_id}_{gid}/
-        If no global_id, uses: {track_id}_nogid
-        
-        Args:
-            stream_id: Stream identifier
-            track_id: Track identifier
-            global_id: Optional global ID
-            
-        Returns:
-            Path object to track folder
-        """
-        gid_suffix = global_id if global_id else "nogid"
-        folder_name = f"{track_id}_{gid_suffix}"
-        return self.debug_images_dir / stream_id / folder_name
-    
-    def _save_crop_image(
-        self,
-        crop: np.ndarray,
-        stream_id: str,
-        track_id: str,
-        global_id: Optional[str] = None,
-        matrix_index: Optional[int] = None,
-    ) -> Optional[int]:
-        """
-        Save crop image to disk with matrix index as filename.
-        Filename corresponds directly to vector position in storage matrix.
-        
-        Args:
-            crop: BGR image crop (numpy array)
-            stream_id: Stream identifier
-            track_id: Track identifier
-            global_id: Optional global ID
-            matrix_index: Index of vector in storage matrix (used as filename)
-            
-        Returns:
-            Matrix index if successful, None otherwise
-        """
-        if not self.enable_crop_storage or crop is None or crop.size == 0 or matrix_index is None:
-            return None
-        
-        try:
-            # Get track folder
-            track_folder = self._get_track_folder_path(stream_id, track_id, global_id)
-            track_folder.mkdir(parents=True, exist_ok=True)
-            
-            # Use matrix index as filename (direct correspondence to vector)
-            image_path = track_folder / f"{matrix_index}.jpg"
-            cv2.imwrite(str(image_path), crop)
-            
-            logger.info(
-                f"[RAMVectorStore] ✅ CROP_SAVED: {image_path.relative_to(self.debug_images_dir)} (matrix_idx={matrix_index})"
-            )
-            
-            return matrix_index
-            
-        except Exception as e:
-            logger.error(f"[RAMVectorStore] Failed to save crop image: {e}")
-            return None
-    
-    def _delete_crop_image(
-        self,
-        stream_id: str,
-        track_id: str,
-        global_id: Optional[str],
-        matrix_index: int,
-    ) -> bool:
-        """
-        Delete crop image by matrix index.
-        
-        Args:
-            stream_id: Stream identifier
-            track_id: Track identifier  
-            global_id: Optional global ID
-            matrix_index: Matrix index (used as filename)
-            
-        Returns:
-            True if deleted successfully
-        """
-        if not self.enable_crop_storage or matrix_index is None:
-            return False
-        
-        try:
-            track_folder = self._get_track_folder_path(stream_id, track_id, global_id)
-            image_path = track_folder / f"{matrix_index}.jpg"
-            
-            if image_path.exists():
-                image_path.unlink()
-                logger.debug(
-                    f"[RAMVectorStore] Deleted crop: {image_path.relative_to(self.debug_images_dir)}"
-                )
-                
-                # Clean up empty directories
-                try:
-                    if not any(track_folder.iterdir()):
-                        track_folder.rmdir()
-                        stream_folder = track_folder.parent
-                        if not any(stream_folder.iterdir()):
-                            stream_folder.rmdir()
-                except OSError:
-                    pass  # Folder not empty or doesn't exist
-                
-                return True
-            
-        except Exception as e:
-            logger.error(f"[RAMVectorStore] Failed to delete crop image: {e}")
-        
-        return False
-    
-    def _rename_track_folder(
-        self,
-        stream_id: str,
-        old_track_id: str,
-        new_track_id: str,
-        old_global_id: Optional[str],
-        new_global_id: Optional[str],
-    ) -> bool:
-        """
-        Rename track folder when track ID or global ID changes.
-        
-        Args:
-            stream_id: Stream identifier
-            old_track_id: Old track ID
-            new_track_id: New track ID
-            old_global_id: Old global ID
-            new_global_id: New global ID
-            
-        Returns:
-            True if renamed successfully
-        """
-        if not self.enable_crop_storage:
-            return False
-        
-        try:
-            old_folder = self._get_track_folder_path(stream_id, old_track_id, old_global_id)
-            new_folder = self._get_track_folder_path(stream_id, new_track_id, new_global_id)
-            
-            if old_folder.exists() and not new_folder.exists():
-                new_folder.parent.mkdir(parents=True, exist_ok=True)
-                old_folder.rename(new_folder)
-                logger.info(
-                    f"[RAMVectorStore] Renamed track folder: "
-                    f"{old_folder.name} -> {new_folder.name}"
-                )
-                return True
-            
-        except Exception as e:
-            logger.error(f"[RAMVectorStore] Failed to rename track folder: {e}")
-        
-        return False
-    
-    def get_track_crops_info(
-        self,
-        stream_id: str,
-        track_id: str,
-        global_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Get information about stored crops for a track.
-        
-        Args:
-            stream_id: Stream identifier
-            track_id: Track identifier
-            global_id: Optional global ID
-            
-        Returns:
-            Dict with crop statistics and file list
-        """
-        if not self.enable_crop_storage:
-            return {"enabled": False}
-        
-        track_folder = self._get_track_folder_path(stream_id, track_id, global_id)
-        
-        if not track_folder.exists():
-            return {
-                "enabled": True,
-                "folder_exists": False,
-                "folder_path": str(track_folder),
-                "crop_count": 0,
-                "crops": []
-            }
-        
-        crops = sorted(track_folder.glob("*.jpg"))
-        
-        return {
-            "enabled": True,
-            "folder_exists": True,
-            "folder_path": str(track_folder),
-            "crop_count": len(crops),
-            "crops": [crop.stem for crop in crops],  # Return UUIDs
-        }
 

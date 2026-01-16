@@ -72,6 +72,7 @@ class ReIDConfig:
     # =================================================================
     snapshot_limit: int = 20            # Max vectors per track (FIFO)
     ram_capacity: int = 50000           # Max total vectors in RAM
+    UPSERT_INTERVAL_ASSIGNED_FRAMES: int = 5  # Interval for crop/vector upsert (ASSIGNED tracks)
     
     # =================================================================
     # EMA settings

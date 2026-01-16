@@ -4,14 +4,13 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 from ..inference.feature_extractor import ReIDFeatureExtractor
 from .track_manager import TrackManager
 from ..storage.ram_vector_store import RAMVectorStore
 from ..storage.metadata_cache import TrackMetadataCache
-from ..demo_config import cfg
+from configs.autocfg import cfg
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +28,9 @@ class ReIDPipeline:
         company_id: str,
         qdrant_face_db=None,
         vector_embedder=None,
-        onnx_model_path: str = "osnet_x1_0_msmt17.onnx",
     ):
         self.stream_id = stream_id
         self.company_id = company_id
-        self.onnx_model_path = onnx_model_path
         self.qdrant_face_db = qdrant_face_db
         self.vector_embedder = vector_embedder
         self.logger = logger
@@ -75,19 +72,18 @@ class ReIDPipeline:
         return (self.reid_tester is not None) or (self.track_manager is not None)
 
     def _init_reid_tester(self) -> None:
-        reid_model_cfg = getattr(cfg.SUPERVISION_SYSTEM.REID, "MODEL", None)
+        reid_model_cfg = getattr(cfg.REID, "MODEL", None)
         
-        # Fallback to defaults if config missing
-        model_name = getattr(reid_model_cfg, "NAME", "osnet_msmt17_engine") if reid_model_cfg else "osnet_msmt17_engine"
-        model_version = getattr(reid_model_cfg, "VERSION", "1") if reid_model_cfg else "1"
+        # Fallback to defaults if config missing (should be there in default.py)
+        model_name = getattr(reid_model_cfg, "NAME", "osnet_msmt17_engine")
+        model_version = getattr(reid_model_cfg, "VERSION", "1")
 
         self.reid_tester = ReIDFeatureExtractor(
             model_name=model_name,
             model_version=model_version,
-            use_triton=False,  # Always use ONNX in demo
+            use_triton=True,
             enable_logging=True,
             metadata_cache=self.metadata_cache,
-            onnx_model_path=self.onnx_model_path,
         )
 
     def _init_ram_vector_store(self) -> None:
@@ -107,8 +103,6 @@ class ReIDPipeline:
             vector_dim=512,
             snapshot_limit=snapshot_limit,
             company_id=self.company_id,
-            enable_crop_storage=True,  # Enable crop storage for ASSIGNED tracks
-            debug_images_dir="debug_images",
         )
 
     def _init_track_manager(self) -> None:
@@ -140,26 +134,19 @@ class ReIDPipeline:
             return {}, {}
 
         # ---- Build person_list for extractor ----
-        # Handle both list and dict formats for person data
-        person_data = metadata.get("person", {})
-        if isinstance(person_data, list):
-            # person_data is already a list of person objects
-            person_list = person_data
-        else:
-            # person_data is dict format with ids/bboxes/captures
-            person_ids = person_data.get("ids", [])
-            person_bboxes = person_data.get("bboxes", [])
-            person_captures = person_data.get("captures", [])
+        person_ids = metadata.get("person", {}).get("ids", [])
+        person_bboxes = metadata.get("person", {}).get("bboxes", [])
+        person_captures = metadata.get("person", {}).get("captures", [])
 
-            person_list = []
-            for i, track_id in enumerate(person_ids):
-                person_list.append(
-                    {
-                        "id": track_id,
-                        "bbox": person_bboxes[i] if i < len(person_bboxes) else {},
-                        "capture": person_captures[i] if i < len(person_captures) else "",
-                    }
-                )
+        person_list = []
+        for i, track_id in enumerate(person_ids):
+            person_list.append(
+                {
+                    "id": track_id,
+                    "bbox": person_bboxes[i] if i < len(person_bboxes) else {},
+                    "capture": person_captures[i] if i < len(person_captures) else "",
+                }
+            )
 
         face_crops_dict: Dict[str, np.ndarray] = {}
         face_rec_map: Dict[str, Dict[str, Any]] = {}
@@ -275,32 +262,21 @@ class ReIDPipeline:
 
                 person_vector = feature_map[track_key]
 
-                logger.info(f"🔍 BEFORE_UPSERT_CHECK: track={track_key} gid={track.global_id} state={track.state} frame={frame_number}")
-                
                 should_upsert = self.metadata_cache.should_upsert_person_vector(
                     track=track,
                     new_person_vector=person_vector,
                     current_frame=frame_number,
                 )
-                
-                logger.info(f"📊 AFTER_UPSERT_CHECK: track={track_key} gid={track.global_id} should_upsert={should_upsert}")
-                
-                # Get crop from person_obj for crop storage
-                crop_image = person_obj.get("capture")  # crop image in BGR format
 
                 self.metadata_cache.mark_person_extract(
                     track=track,
                     frame_num=frame_number,
                     vector=person_vector,
-                    crop=crop_image,  # Pass crop for storage
                 )
 
                 # Collect for batch commit (instead of per-track commit)
                 if should_upsert and track.global_id:
-                    logger.info(f"✅ ADD_TO_BATCH: track={track_key} gid={track.global_id}")
                     tracks_to_batch_commit.append((track, person_vector))
-                else:
-                    logger.info(f"⏭️ SKIP_BATCH: track={track_key} gid={track.global_id} should_upsert={should_upsert}")
 
             # BATCH COMMIT all collected tracks at once (single RAM upsert call)
             if tracks_to_batch_commit:
@@ -327,9 +303,6 @@ class ReIDPipeline:
 
         metadata["reid_features"] = processed_metadata.get("reid_features", {})
         metadata["reid_person_list"] = processed_metadata.get("person", [])
-
-        # ✅ CRITICAL: Assign global IDs after feature extraction
-        self.assign_global_ids(metadata, face_crops_dict, face_rec_map)
 
         return face_crops_dict, face_rec_map
 
@@ -408,7 +381,7 @@ class ReIDPipeline:
                 person_obj["assignment_method"] = "retain_assigned"
                 person_obj["assignment_score"] = getattr(track_metadata, "assignment_confidence", None)
                 person_obj["vote_winner"] = None
-                continue  # ✅ CRITICAL: Skip assigned tracks from voting
+                continue
 
             entries.append(
                 {
@@ -422,7 +395,6 @@ class ReIDPipeline:
         assignment_results: Dict[str, Dict[str, Any]] = {}
         if entries:
             pending_desc = {"count": len(entries), "tracks": [e["track_id"] for e in entries[:5]]}
-            self.logger.info(f"[ReIDPipeline] 🔄 Voting pending tracks: {pending_desc['count']} (frame={frame_number}, sample={pending_desc})")
             
             try:
                 assignment_results = self.track_manager.assign_global_ids_batch(
@@ -431,9 +403,6 @@ class ReIDPipeline:
                     frame_number=frame_number,
                     active_track_ids=active_track_ids,
                 )
-                self.logger.info(f"[ReIDPipeline] ✅ Assignment results: {len(assignment_results)} tracks assigned")
-                for track_id, info in assignment_results.items():
-                    self.logger.info(f"  {track_id} -> {info.get('global_id')} ({info.get('method')})")
             except Exception as exc:
                 logger.error(
                     "[ReIDPipeline] Track manager assign_global_ids_batch failed: %s",
@@ -479,168 +448,5 @@ class ReIDPipeline:
 
 
     def stop(self) -> None:
-        if self.reid_tester:
-            self.reid_tester.stop()
-    
-    def process_reid_frame(
-        self,
-        stream_id: str,
-        frame: Any,  # Frame data
-        objects: List[Dict[str, Any]],  # Objects from tracking
-        frame_idx: int = 0,
-    ) -> Dict[str, Optional[str]]:
-        """
-        Process frame for ReID and return global ID mappings.
-        
-        Args:
-            stream_id: Stream identifier
-            frame: Frame data (BGR image)
-            objects: List of tracked objects with track_id, bbox, etc.
-            frame_idx: Frame index
-            
-        Returns:
-            Dict[track_id -> global_id or None]
-        """
-        if not objects:
-            return {}
-        
-        # Extract person objects only
-        
-        # Handle case where objects might be incorrectly formatted
-        if not objects:
-            return {}
-            
-        # Ensure objects is a list of dicts
-        if isinstance(objects, dict):
-            objects = objects.get('objects', [])
-        
-        if not isinstance(objects, list):
-            self.logger.error("Objects should be a list, got: %s", type(objects))
-            return {}
-            
-        person_objects = []
-        for obj in objects:
-            if not isinstance(obj, dict):
-                self.logger.error("Object should be dict, got: %s", type(obj))
-                continue
-            if obj.get('class') == 'person' or obj.get('class_id') == 0:
-                person_objects.append(obj)
-        
-        if not person_objects:
-            return {}
-            
-        # Use BoxMOT API for accurate cropping (fixes similarity score issues)
-        person_list = []
-        
-        if not person_objects:
-            return {}
-        
-        # Extract all bboxes for batch processing
-        bbox_list = []
-        track_ids = []
-        valid_objects = []
-        
-        for obj in person_objects:
-            bbox = obj.get('bbox', [])
-            track_id = obj.get('track_id', obj.get('id'))
-            
-            if len(bbox) >= 4 and frame is not None:
-                # BoxMOT expects format: [x1, y1, x2, y2]
-                bbox_array = np.array([bbox[0], bbox[1], bbox[2], bbox[3]], dtype=np.float32)
-                self.logger.info(f"📦 BBOX_INPUT: track={track_id} bbox=[{bbox[0]:.2f}, {bbox[1]:.2f}, {bbox[2]:.2f}, {bbox[3]:.2f}]")
-                
-                bbox_list.append(bbox_array)
-                track_ids.append(track_id)
-                valid_objects.append(obj)
-        
-        if not bbox_list:
-            return {}
-
-        # Manual cropping logic (fallback approach)
-        for obj in person_objects:
-            bbox = obj.get('bbox', [])
-            if len(bbox) >= 4 and frame is not None:
-                bbox_array = np.array(bbox[:4])
-                x1, y1, x2, y2 = bbox_array.round().astype(int)
-                track_id = obj.get('track_id', obj.get('id'))
-
-                h, w = frame.shape[:2]
-                x1_clip, y1_clip = max(0, x1), max(0, y1)
-                x2_clip, y2_clip = min(w, x2), min(h, y2)
-
-                if x2_clip > x1_clip and y2_clip > y1_clip:
-                    crop = frame[y1_clip:y2_clip, x1_clip:x2_clip]
-                    crop_h, crop_w = crop.shape[:2]
-                    crop_area = crop_h * crop_w
-                    self.logger.info(f"✅ MANUAL_CROP_OK: track={track_id} crop_size=({crop_w}x{crop_h}) area={crop_area} mean_pixel={crop.mean():.2f}")
-
-                    person_data = {
-                        'id': track_id,
-                        'confidence': obj.get('confidence', 0.0),
-                        'capture': crop,
-                        'bbox': bbox
-                    }
-                    person_list.append(person_data)
-                else:
-                    self.logger.warning(f"❌ MANUAL_CROP_FAILED: track={track_id} invalid bbox after clipping")
-
-        
-        # Build metadata structure that matches reid_v2 expectations  
-        # Transform person_list into metadata format expected by run_reid
-        metadata = {
-            'stream_id': stream_id,
-            'frame_number': frame_idx,
-            'person': person_list,  # Use the person_list directly
-            'objects': objects  # Include original objects for global ID assignment
-        }
-        
-        # Process through existing run_reid pipeline which handles feature extraction and global ID assignment
-        try:
-            # This will extract features, update metadata cache, and assign global IDs through the full pipeline
-            feature_results, voting_results = self.run_reid(
-                metadata=metadata, 
-                face_person_map={},  # Empty dict for demo
-                face_recognition_results=None,
-                face_data=None
-            )
-            
-            # After run_reid, metadata should be updated with global IDs
-            # Extract global ID mappings from the updated metadata  
-            global_id_mappings = {}
-            
-            # Check objects in metadata for assigned global IDs
-            updated_objects = metadata.get('objects', [])
-            for obj in updated_objects:
-                if obj.get('class') == 'person' or obj.get('class_id') == 0:
-                    track_id = str(obj.get('track_id', obj.get('id')))
-                    global_id = obj.get('global_id')
-                    global_id_mappings[track_id] = global_id
-            
-            # Also check person list for global IDs
-            updated_person_list = metadata.get('person', [])
-            if isinstance(updated_person_list, list):
-                for person in updated_person_list:
-                    track_id = str(person.get('id'))
-                    global_id = person.get('global_id')
-                    if track_id not in global_id_mappings:
-                        global_id_mappings[track_id] = global_id
-                        
-            # Also check reid_person_list 
-            reid_person_list = metadata.get('reid_person_list', [])
-            if isinstance(reid_person_list, list):
-                for person in reid_person_list:
-                    track_id = str(person.get('id'))
-                    global_id = person.get('global_id')
-                    if track_id not in global_id_mappings:
-                        global_id_mappings[track_id] = global_id
-            
-            return global_id_mappings
-            
-        except Exception as e:
-            self.logger.error("Error in process_reid_frame: %s", e, exc_info=True)
-            return {}
-            
-    def stop(self):
-        """Stop and cleanup pipeline components."""
         if self.reid_tester:
             self.reid_tester.stop()

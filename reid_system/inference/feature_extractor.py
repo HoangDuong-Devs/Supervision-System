@@ -124,7 +124,7 @@ class ReIDFeatureExtractor:
         for i, crop in enumerate(crops):
             if crop is None or crop.size == 0:
                 continue
-                
+            
             # Resize to model input size (128x256)
             resized = cv2.resize(crop, (128, 256))
             
@@ -236,7 +236,7 @@ class ReIDFeatureExtractor:
             if features_batch is None:
                 self.logger.error("[ReIDFeatureExtractor] ONNX inference returned None")
                 return results
-                
+            
             elapsed = (time.perf_counter() - t0) * 1000
             self.logger.debug(
                 "[ReIDFeatureExtractor] Batch inference: %d crops in %.2fms",
@@ -248,7 +248,8 @@ class ReIDFeatureExtractor:
                 if feat_idx < len(features_batch):
                     feature = features_batch[feat_idx]
                     if feature is not None:
-                        feature_vector = l2_normalize(feature.flatten())
+                        feature_flat = feature.flatten()
+                        feature_vector = l2_normalize(feature_flat)
                         results[orig_idx] = feature_vector
                         
                         # Update metadata cache
